@@ -10,7 +10,8 @@
     "test-iPhone-emulation": "node playwright-single-on-iphone.js",
     "test-lighthouse-report": "node playwright-lighthouse-report.js",
     "test:alert-email": "node test-smtp-alert.js",
-    "test:imap-read": "node test-imap-read.js"
+    "test:imap-read": "node test-imap-read.js",
+    "start:api": "node api-server.js"
   },
   "engines": {
     "node": ">=12.7.0"
@@ -23,5 +24,10 @@
     "imapflow": "^1.3.3",
     "nodemailer": "^6.10.1",
     "playwright": "^1.55.0"
+  },
+  "dependencies": {
+    "express": "^4.22.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
   }
 }

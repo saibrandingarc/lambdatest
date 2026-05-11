@@ -16,6 +16,7 @@ function isCiEnvironment() {
   if (process.env.GITHUB_ACTIONS) return true;
   if (process.env.AZURE_PIPELINES) return true;
   if (process.env.BUILD_BUILDID) return true;
+  if (/^1|true|yes$/i.test(String(process.env.SKIP_LOCAL_DOTENV_MERGE ?? '').trim())) return true;
   return false;
 }
 
@@ -815,6 +816,12 @@ function logStartupMode() {
 (async () => {
   logStartupMode();
 
+  const outputJsonResult = /^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim());
+  /** @type {any} */
+  let apiResult = null;
+  let preSubmitSnapshot = null;
+  let responseTextSnapshot = '';
+
   const capabilities = {
     browserName: 'Chrome',
     browserVersion: '147.0',
@@ -873,17 +880,54 @@ function logStartupMode() {
 
     await refillSyncCf7(form, fieldDescriptors, contactFormValues, 200);
 
-    const preSubmit = Object.fromEntries(
-      await Promise.all(
-        fieldDescriptors.map(async (f) => [
-          f.name,
-          f.kind === 'checkbox'
-            ? String(await visibleFormControl(form, f).isChecked())
-            : await visibleFormControl(form, f).inputValue(),
-        ])
-      )
-    );
-    console.log('Field values before submit (visible inputs):', preSubmit);
+    // CF7/Fusion often clears *visible* inputs right after applying/validating,
+    // but keeps the submitted values in hidden duplicates. So for API/debugging,
+    // snapshot the value from any input/textarea with the same `name`, preferring
+    // non-empty values (and for checkboxes, prefer checked state).
+    const preSubmit = await form.evaluate((formEl, fields) => {
+      const isHidden = (node) => {
+        const r = node.getBoundingClientRect();
+        const cs = window.getComputedStyle(node);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return true;
+        return r.width === 0 || r.height === 0;
+      };
+
+      const getTextValue = (name) => {
+        const nodes = [
+          ...formEl.querySelectorAll(`input[name="${CSS.escape(name)}"]`),
+          ...formEl.querySelectorAll(`textarea[name="${CSS.escape(name)}"]`),
+        ];
+        // Prefer any non-empty value (hidden duplicates survive even if visible cleared).
+        for (const n of nodes) {
+          if (!('value' in n)) continue;
+          if (String(n.value || '').trim().length) return String(n.value);
+        }
+        // Otherwise return first value we find (could be empty string).
+        const first = nodes.find((n) => 'value' in n);
+        return first && 'value' in first ? String(first.value || '') : '';
+      };
+
+      const getCheckboxValue = (name) => {
+        // Prefer actual checkbox checked state.
+        const boxes = [...formEl.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(name)}"]`)];
+        const box = boxes.find((b) => !isHidden(b)) || boxes[0];
+        if (box && 'checked' in box) return box.checked ? 'true' : 'false';
+
+        // Fallback to hidden mirror inputs: CF7 often uses type="hidden" named the same.
+        const hidden = formEl.querySelector(`input[type="hidden"][name="${CSS.escape(name)}"]`);
+        if (hidden && 'value' in hidden) return String(hidden.value || '').trim() === '1' ? 'true' : 'false';
+        return 'false';
+      };
+
+      const out = {};
+      for (const f of fields) {
+        if (f.kind === 'checkbox') out[f.name] = getCheckboxValue(f.name);
+        else out[f.name] = getTextValue(f.name);
+      }
+      return out;
+    }, fieldDescriptors);
+    preSubmitSnapshot = preSubmit;
+    console.log('Field values before submit (submitted snapshot):', preSubmit);
 
     console.log('Submitting form...');
     await new Promise((r) => setTimeout(r, 300));
@@ -896,11 +940,29 @@ function logStartupMode() {
     console.log('Waiting for response...');
     await page.waitForSelector('.wpcf7-response-output', { timeout: 20000 });
     const responseText = await readCf7ResponseText(page);
+    responseTextSnapshot = responseText;
     console.log('Response:', responseText);
 
     if (responseText && responseText.toLowerCase().includes('thank')) {
       console.log('Test PASSED!');
+      let emailVerified = false;
       await waitForEmailReceipt();
+      emailVerified = verifyEmail ? true : false;
+
+      apiResult = {
+        ok: true,
+        responseText,
+        preSubmit,
+        emailVerification: {
+          enabled: verifyEmail,
+          verified: emailVerified,
+        },
+      };
+
+      if (outputJsonResult) {
+        console.log('RESULT_JSON:' + JSON.stringify(apiResult));
+      }
+
       await lambdaTestStatus(page, {
         action: 'setTestStatus',
         arguments: { status: 'passed', remark: verifyEmail ? 'Form + email verification passed' : 'Form submitted successfully' },
@@ -911,6 +973,19 @@ function logStartupMode() {
       console.log('CF7 validation details:', JSON.stringify(details, null, 2));
       if (diagnostic) console.log('Summary:', diagnostic);
 
+      apiResult = {
+        ok: false,
+        responseText,
+        preSubmit: preSubmitSnapshot,
+        error: 'Form submission did not return thank-you response',
+        details,
+        summary: diagnostic,
+      };
+
+      if (outputJsonResult) {
+        console.log('RESULT_JSON:' + JSON.stringify(apiResult));
+      }
+
       throw new Error(
         diagnostic
           ? `Form submission failed — ${responseText}. ${diagnostic}`
@@ -919,6 +994,35 @@ function logStartupMode() {
     }
   } catch (e) {
     console.log('Test FAILED:', e.message);
+
+    if (!apiResult) {
+      // Best-effort: try to capture response + validation errors for API consumers.
+      try {
+        responseTextSnapshot = responseTextSnapshot || (await readCf7ResponseText(page).catch(() => ''));
+      } catch {
+        /* ignore */
+      }
+      let details = null;
+      try {
+        details = await gatherSubmitFailureDetails(page);
+      } catch {
+        /* ignore */
+      }
+      const diagnostic = details ? formatSubmitFailureSummary(details) : '';
+      apiResult = {
+        ok: false,
+        responseText: responseTextSnapshot,
+        preSubmit: preSubmitSnapshot,
+        error: e.message,
+        details,
+        summary: diagnostic || undefined,
+      };
+    }
+
+    if (outputJsonResult) {
+      console.log('RESULT_JSON:' + JSON.stringify(apiResult));
+    }
+
     await sendFailureAlertEmail(page, e.message);
     await lambdaTestStatus(page, { action: 'setTestStatus', arguments: { status: 'failed', remark: e.message } });
     throw e;
@@ -928,5 +1032,8 @@ function logStartupMode() {
   }
 })().catch((err) => {
   console.error('Unexpected error:', err);
+  if (/^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim())) {
+    console.log('RESULT_JSON:' + JSON.stringify({ ok: false, error: err.message }));
+  }
   process.exit(1);
 });
