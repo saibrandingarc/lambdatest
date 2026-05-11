@@ -1,6 +1,7 @@
 {
   "name": "lambdatest-playwright-sample",
   "scripts": {
+    "start": "node api-server.js",
     "test": "node playwright-single.js",
     "test:lambdatest": "USE_LAMBDATEST=1 node playwright-single.js",
     "test-smartui": "node playwright-smartui.js",

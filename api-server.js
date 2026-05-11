@@ -104,7 +104,13 @@ const swaggerSpec = swaggerJSDoc({
   apis: [__filename],
 });
 
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+// Split mount (recommended for Express): static assets + GET handler — avoids "Cannot GET /docs" on some hosts.
+app.use('/docs', swaggerUi.serve);
+app.get('/docs', swaggerUi.setup(swaggerSpec));
+
+app.get('/', (_req, res) => {
+  res.redirect('/docs');
+});
 
 /**
  * @openapi
