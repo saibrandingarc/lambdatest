@@ -1,0 +1,52 @@
+# Example: Contact form E2E on LambdaTest + optional IMAP verification (Azure DevOps).
+# Link a Variable Group with secrets: LT_USERNAME, LT_ACCESS_KEY, IMAP_USER, EMAIL_APP_PSWD (or IMAP_PASS),
+# and set pipeline variables for the rest (or put non-secrets in the group).
+
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  USE_LAMBDATEST: '1'
+  HEADLESS: 'true'
+  CLOSE_BROWSER: '1'
+  VERIFY_EMAIL: '1'
+  NODE_VERSION: '20.x'
+
+steps:
+  - task: NodeTool@0
+    inputs:
+      versionSpec: $(NODE_VERSION)
+
+  - script: npm ci
+    displayName: npm ci
+
+  - script: node playwright-single.js
+    displayName: Run contact form test (LambdaTest + email verify)
+    env:
+      USE_LAMBDATEST: $(USE_LAMBDATEST)
+      HEADLESS: $(HEADLESS)
+      CLOSE_BROWSER: $(CLOSE_BROWSER)
+      VERIFY_EMAIL: $(VERIFY_EMAIL)
+      CONTACT_PAGE_URL: $(CONTACT_PAGE_URL)
+      LT_USERNAME: $(LT_USERNAME)
+      LT_ACCESS_KEY: $(LT_ACCESS_KEY)
+      IMAP_HOST: $(IMAP_HOST)
+      IMAP_PORT: $(IMAP_PORT)
+      IMAP_SECURE: $(IMAP_SECURE)
+      IMAP_USER: $(IMAP_USER)
+      EMAIL_APP_PSWD: $(EMAIL_APP_PSWD)
+      IMAP_MAILBOX: $(IMAP_MAILBOX)
+      EMAIL_EXPECTED_SUBJECT: $(EMAIL_EXPECTED_SUBJECT)
+      EMAIL_EXPECTED_FROM: $(EMAIL_EXPECTED_FROM)
+      EMAIL_VERIFY_TIMEOUT_MS: $(EMAIL_VERIFY_TIMEOUT_MS)
+      EMAIL_VERIFY_POLL_MS: $(EMAIL_VERIFY_POLL_MS)
+      EMAIL_LOOKBACK_MINUTES: $(EMAIL_LOOKBACK_MINUTES)
+      ALERT_EMAIL_ON_FAILURE: $(ALERT_EMAIL_ON_FAILURE)
+      ALERT_SMTP_HOST: $(ALERT_SMTP_HOST)
+      ALERT_EMAIL_TO: $(ALERT_EMAIL_TO)
+      ALERT_EMAIL_FROM: $(ALERT_EMAIL_FROM)
+      ALERT_SMTP_USER: $(ALERT_SMTP_USER)
+      ALERT_SMTP_PASS: $(ALERT_SMTP_PASS)
