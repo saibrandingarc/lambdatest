@@ -44,6 +44,29 @@ if (!isCiEnvironment()) {
   mergeLocalDotenvOverProcessEnv();
 }
 
+/**
+ * Adds the query flag used by the WordPress/PHP side to detect this automated run.
+ * The flag needs to be present both on the page load and on CF7 submit requests.
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+function withLambdaTestQueryParam(rawUrl) {
+  const text = String(rawUrl || '').trim();
+  if (!text) return text;
+
+  try {
+    const url = new URL(text);
+    url.searchParams.set('lambdatest', '1');
+    return url.toString();
+  } catch {
+    const hashIndex = text.indexOf('#');
+    const beforeHash = hashIndex >= 0 ? text.slice(0, hashIndex) : text;
+    const hash = hashIndex >= 0 ? text.slice(hashIndex) : '';
+    const separator = beforeHash.includes('?') ? '&' : '?';
+    return `${beforeHash}${separator}lambdatest=1${hash}`;
+  }
+}
+
 // --- env-backed flags ----------------------------------------------------------
 
 const useLambdaTest = /^1|true|yes$/i.test(String(process.env.USE_LAMBDATEST ?? '').trim());
@@ -53,8 +76,9 @@ const closeBrowserImmediately =
   headlessLocal ||
   /^1|true|yes$/i.test(String(process.env.CLOSE_BROWSER ?? '').trim());
 
-const CONTACT_PAGE_URL =
-  process.env.CONTACT_PAGE_URL || 'https://adamparksi1stg.wpenginepowered.com/contact-us/';
+const CONTACT_PAGE_URL = withLambdaTestQueryParam(
+  process.env.CONTACT_PAGE_URL || 'https://adamparksi1stg.wpenginepowered.com/contact-us/'
+);
 const verifyEmail = /^1|true|yes$/i.test(String(process.env.VERIFY_EMAIL ?? '').trim());
 const emailVerifyTimeoutMs = Number(process.env.EMAIL_VERIFY_TIMEOUT_MS || 120000);
 const emailVerifyPollMs = Number(process.env.EMAIL_VERIFY_POLL_MS || 10000);
@@ -619,6 +643,50 @@ async function refillSyncCf7(form, fields, valuesByName, pauseMs) {
 }
 
 /**
+ * Ensures non-AJAX form submits also carry `?lambdatest=1` as a GET parameter.
+ * Also adds a hidden field for handlers that inspect submitted form values.
+ * @param {import('playwright').Locator} form
+ */
+async function ensureLambdaTestFormSubmitMarker(form) {
+  await form.evaluate((formEl) => {
+    const withParam = (rawUrl) => {
+      const url = new URL(rawUrl || window.location.href, window.location.href);
+      url.searchParams.set('lambdatest', '1');
+      return url.toString();
+    };
+
+    formEl.setAttribute('action', withParam(formEl.getAttribute('action')));
+
+    let marker = formEl.querySelector('input[name="lambdatest"]');
+    if (!marker) {
+      marker = document.createElement('input');
+      marker.type = 'hidden';
+      marker.name = 'lambdatest';
+      formEl.appendChild(marker);
+    }
+    marker.value = '1';
+  });
+}
+
+/**
+ * Contact Form 7 usually submits through XHR/fetch to a REST endpoint, so the
+ * page URL alone is not enough for PHP code that checks `$_GET['lambdatest']`.
+ * @param {import('playwright').BrowserContext} context
+ */
+async function installLambdaTestSubmitQueryParam(context) {
+  await context.route(/\/wp-json\/contact-form-7\/|admin-ajax\.php|wpcf7/i, async (route) => {
+    const request = route.request();
+    if (request.method().toUpperCase() !== 'POST') {
+      await route.continue();
+      return;
+    }
+
+    const markedUrl = withLambdaTestQueryParam(request.url());
+    await route.continue(markedUrl === request.url() ? undefined : { url: markedUrl });
+  });
+}
+
+/**
  * Reads CF7 response text (Fusion theme exposes `.fusion-alert-content`; otherwise generic output).
  * @param {import('playwright').Page} page
  * @returns {Promise<string>}
@@ -847,16 +915,18 @@ function logStartupMode() {
     : await launchLocalBrowser();
 
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await installLambdaTestSubmitQueryParam(context);
   const page = await context.newPage();
 
   try {
-    console.log('Opening Contact Page...');
+    console.log('Opening Contact Page:', CONTACT_PAGE_URL);
     await page.goto(CONTACT_PAGE_URL, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
     await dismissOverlays(page);
 
     console.log('Filling Contact Form...');
     const form = await resolveContactForm(page);
+    await ensureLambdaTestFormSubmitMarker(form);
 
     const fieldDescriptors = await collectFillableFields(form);
     if (!fieldDescriptors.length) {
@@ -951,6 +1021,7 @@ function logStartupMode() {
 
       apiResult = {
         ok: true,
+        url: CONTACT_PAGE_URL,
         responseText,
         preSubmit,
         emailVerification: {
@@ -975,6 +1046,7 @@ function logStartupMode() {
 
       apiResult = {
         ok: false,
+        url: CONTACT_PAGE_URL,
         responseText,
         preSubmit: preSubmitSnapshot,
         error: 'Form submission did not return thank-you response',
@@ -1011,6 +1083,7 @@ function logStartupMode() {
       const diagnostic = details ? formatSubmitFailureSummary(details) : '';
       apiResult = {
         ok: false,
+        url: CONTACT_PAGE_URL,
         responseText: responseTextSnapshot,
         preSubmit: preSubmitSnapshot,
         error: e.message,
@@ -1033,7 +1106,7 @@ function logStartupMode() {
 })().catch((err) => {
   console.error('Unexpected error:', err);
   if (/^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim())) {
-    console.log('RESULT_JSON:' + JSON.stringify({ ok: false, error: err.message }));
+    console.log('RESULT_JSON:' + JSON.stringify({ ok: false, url: CONTACT_PAGE_URL, error: err.message }));
   }
   process.exit(1);
 });

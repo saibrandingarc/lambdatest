@@ -4,12 +4,6 @@
     "start": "node api-server.js",
     "test": "node playwright-single.js",
     "test:lambdatest": "USE_LAMBDATEST=1 node playwright-single.js",
-    "test-smartui": "node playwright-smartui.js",
-    "test-parallel": "node playwright-parallel.js",
-    "test-android": "node playwright-android-real-device.js",
-    "test-extension": "node playwright-extensions-test.js",
-    "test-iPhone-emulation": "node playwright-single-on-iphone.js",
-    "test-lighthouse-report": "node playwright-lighthouse-report.js",
     "test:alert-email": "node test-smtp-alert.js",
     "test:imap-read": "node test-imap-read.js",
     "start:api": "node api-server.js"
