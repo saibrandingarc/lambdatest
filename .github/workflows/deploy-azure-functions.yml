@@ -1,0 +1,49 @@
+# Deploy contact-form-timer Azure Function (timer → playwright-single.js → LambdaTest).
+#
+# One-time setup:
+# 1. Create a Linux Function App (Node 20, Functions v4) + Storage account in Azure Portal.
+# 2. Function App → Configuration → add application settings (see azure/app-settings.template.txt).
+# 3. Function App → Get publish profile → GitHub repo Secrets → AZURE_FUNCTIONAPP_PUBLISH_PROFILE
+# 4. Set env AZURE_FUNCTIONAPP_NAME below (or repo variable) to your app name.
+
+name: Deploy Azure Functions
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: LambdaTestFunction
+  NODE_VERSION: '20.x'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate entrypoints
+        run: |
+          node --check playwright-single.js
+          node --check contact-form-timer/index.js
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true

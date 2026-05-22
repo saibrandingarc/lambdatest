@@ -1,28 +1,29 @@
 {
   "name": "lambdatest-playwright-sample",
   "scripts": {
-    "start": "node api-server.js",
+    "start": "bash func-start.sh",
     "test": "node playwright-single.js",
-    "test:lambdatest": "USE_LAMBDATEST=1 node playwright-single.js",
+    "test:local": "USE_LAMBDATEST=0 HEADLESS=false CLOSE_BROWSER=0 node playwright-single.js",
+    "test:lambdatest": "USE_LAMBDATEST=1 CLOSE_BROWSER=1 node playwright-single.js",
+    "timer": "bash func-start.sh",
+    "scheduler": "bash func-start.sh",
     "test:alert-email": "node test-smtp-alert.js",
     "test:imap-read": "node test-imap-read.js",
-    "start:api": "node api-server.js"
+    "deploy:azure": "bash azure/deploy.sh"
   },
   "engines": {
-    "node": ">=12.7.0"
+    "node": ">=20.0.0"
   },
-  "devDependencies": {
-    "@cucumber/cucumber": "^12.2.0",
-    "@playwright/test": "^1.55.0",
+  "dependencies": {
     "dotenv": "^17.2.2",
-    "expect": "^30.1.2",
     "imapflow": "^1.3.3",
     "nodemailer": "^6.10.1",
     "playwright": "^1.55.0"
   },
-  "dependencies": {
-    "express": "^4.22.1",
-    "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.1"
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.2.0",
+    "@playwright/test": "^1.55.0",
+    "azurite": "^3.35.0",
+    "expect": "^30.1.2"
   }
 }

@@ -16,6 +16,7 @@ function isCiEnvironment() {
   if (process.env.GITHUB_ACTIONS) return true;
   if (process.env.AZURE_PIPELINES) return true;
   if (process.env.BUILD_BUILDID) return true;
+  if (process.env.WEBSITE_SITE_NAME) return true;
   if (/^1|true|yes$/i.test(String(process.env.SKIP_LOCAL_DOTENV_MERGE ?? '').trim())) return true;
   return false;
 }
@@ -75,15 +76,50 @@ const closeBrowserImmediately =
   useLambdaTest ||
   headlessLocal ||
   /^1|true|yes$/i.test(String(process.env.CLOSE_BROWSER ?? '').trim());
+const keepBrowserOpenAfterTest = !useLambdaTest && !headlessLocal && !closeBrowserImmediately;
 
-const CONTACT_PAGE_URL = withLambdaTestQueryParam(
-  process.env.CONTACT_PAGE_URL || 'https://adamparksi1stg.wpenginepowered.com/contact-us/'
-);
+/**
+ * Reads CONTACT_PAGE_URLS (JSON array or comma/newline-separated) or CONTACT_PAGE_URL (single).
+ * Returns an empty array when neither is set — callers must not run tests in that case.
+ * @returns {string[]}
+ */
+function getContactPageUrls() {
+  const urlsRaw = String(process.env.CONTACT_PAGE_URLS || '').trim();
+  const single = String(process.env.CONTACT_PAGE_URL || '').trim();
+
+  if (urlsRaw) {
+    if (urlsRaw.startsWith('[')) {
+      try {
+        const arr = JSON.parse(urlsRaw);
+        if (Array.isArray(arr)) {
+          const list = arr.map((u) => withLambdaTestQueryParam(String(u).trim())).filter(Boolean);
+          if (list.length) return list;
+        }
+      } catch (e) {
+        console.warn('CONTACT_PAGE_URLS JSON parse failed; treating as comma-separated.', e.message);
+      }
+    }
+    const list = urlsRaw
+      .split(/[\n,]+/)
+      .map((u) => withLambdaTestQueryParam(u.trim()))
+      .filter(Boolean);
+    if (list.length) return list;
+  }
+
+  if (single) return [withLambdaTestQueryParam(single)];
+  return [];
+}
 const verifyEmail = /^1|true|yes$/i.test(String(process.env.VERIFY_EMAIL ?? '').trim());
 const emailVerifyTimeoutMs = Number(process.env.EMAIL_VERIFY_TIMEOUT_MS || 120000);
 const emailVerifyPollMs = Number(process.env.EMAIL_VERIFY_POLL_MS || 10000);
-/** When true, every discovered checkbox is checked (overrides keyword heuristics unless CONTACT_FORM_VALUES_JSON sets that name). */
-const checkAllCheckboxes = /^1|true|yes$/i.test(String(process.env.CHECK_ALL_CHECKBOXES ?? '').trim());
+/**
+ * When true (default), every checkbox is checked unless CONTACT_FORM_VALUES_JSON sets that name.
+ * Opt out with CHECK_ALL_CHECKBOXES=0|false|no.
+ */
+const checkAllCheckboxesRaw = String(process.env.CHECK_ALL_CHECKBOXES ?? '').trim();
+const checkAllCheckboxes = /^0|false|no$/i.test(checkAllCheckboxesRaw)
+  ? false
+  : checkAllCheckboxesRaw === '' || /^1|true|yes$/i.test(checkAllCheckboxesRaw);
 /** When true, send SMTP email on any test failure (see sendFailureAlertEmail / ALERT_SMTP_* env vars). */
 const alertEmailOnFailure = /^1|true|yes$/i.test(String(process.env.ALERT_EMAIL_ON_FAILURE ?? '').trim());
 
@@ -274,14 +310,14 @@ async function closeBrowserWhenReady(context, browser) {
  * Local headed runs: blocks on "Press Enter" so you can inspect the page (skipped without TTY or when CLOSE_BROWSER=1).
  */
 async function pauseIfLocalHeadedKeepingBrowserOpen() {
-  if (closeBrowserImmediately) return;
+  if (!keepBrowserOpenAfterTest) return;
   if (!process.stdin.isTTY) {
-    console.log('No interactive terminal; skipping wait-before-close.');
+    console.log('Browser left open — close the Chromium window manually.');
     return;
   }
   await new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question('Press Enter to close the browser... ', () => {
+    rl.question('Test finished. Browser stays open — press Enter to end this script... ', () => {
       rl.close();
       resolve();
     });
@@ -407,13 +443,19 @@ function visibleFormControl(form, field) {
  * @param {string} value Raw or override string (`true`/`1`/`yes`/`on` = checked for checkboxes).
  */
 async function fillCf7Control(form, field, value) {
-  const locator = visibleFormControl(form, field);
-  await locator.scrollIntoViewIfNeeded();
   if (field.kind === 'checkbox') {
     const checked = /^1|true|yes|on$/i.test(String(value).trim());
-    await locator.setChecked(checked);
+    const boxes = form.locator(`input[type="checkbox"][name="${field.name}"]`).filter({ visible: true });
+    const count = await boxes.count();
+    for (let i = 0; i < count; i++) {
+      const box = boxes.nth(i);
+      await box.scrollIntoViewIfNeeded();
+      await box.setChecked(checked);
+    }
     return;
   }
+  const locator = visibleFormControl(form, field);
+  await locator.scrollIntoViewIfNeeded();
   await locator.click({ timeout: 5000 });
   await locator.fill(value);
 }
@@ -504,7 +546,7 @@ async function collectFieldMetas(form, fields) {
 /**
  * Builds `name` → value string using `name` / `id` / `placeholder` / `type` / `kind`, then merges `overrides`.
  * Checkbox values: `"true"` / `"1"` / `"yes"` / `"on"` (case-insensitive) → checked; otherwise unchecked.
- * Set env `CHECK_ALL_CHECKBOXES=1` to check every checkbox (e.g. multi-line legal consent forms).
+ * By default every checkbox is checked; set `CHECK_ALL_CHECKBOXES=0` to use consent-keyword heuristics only.
  * @param {Array<{ name: string, kind?: string, tag: string, type: string, id: string, placeholder: string }>} fieldMetas
  * @param {Record<string, string>} overrides
  * @returns {Record<string, string>}
@@ -638,8 +680,42 @@ async function refillAllVisibleFields(form, fields, valuesByName) {
  */
 async function refillSyncCf7(form, fields, valuesByName, pauseMs) {
   await refillAllVisibleFields(form, fields, valuesByName);
+  if (checkAllCheckboxes) await ensureAllFormCheckboxesChecked(form);
   if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
   await syncHiddenInputsFromVisible(form, fields);
+}
+
+/**
+ * Checks every visible checkbox in the form and syncs CF7 hidden mirrors (acceptance / consent fields).
+ * @param {import('playwright').Locator} form
+ */
+async function ensureAllFormCheckboxesChecked(form) {
+  await form.evaluate((formEl) => {
+    const isHidden = (node) => {
+      const r = node.getBoundingClientRect();
+      const cs = window.getComputedStyle(node);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return true;
+      return r.width === 0 || r.height === 0;
+    };
+
+    const names = new Set();
+    formEl.querySelectorAll('input[type="checkbox"]').forEach((el) => {
+      if (isHidden(el)) return;
+      el.checked = true;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      const name = el.getAttribute('name');
+      if (name) names.add(name);
+    });
+
+    for (const name of names) {
+      formEl.querySelectorAll(`input[type="hidden"][name="${name}"]`).forEach((el) => {
+        if (!isHidden(el)) return;
+        el.value = '1';
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+  });
 }
 
 /**
@@ -697,6 +773,57 @@ async function readCf7ResponseText(page) {
     return (await fusionAlert.first().textContent())?.trim() ?? '';
   }
   return (await page.locator('.wpcf7-response-output').textContent())?.trim() ?? '';
+}
+
+/**
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isCf7ThankYouResponse(text) {
+  const t = String(text || '').toLowerCase();
+  return t.includes('thank') || t.includes('has been sent') || t.includes('mail sent');
+}
+
+/**
+ * Waits for CF7/Fusion submit outcome (success can lag behind the first response line).
+ * @param {import('playwright').Page} page
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{ ok: boolean, responseText: string, details: Awaited<ReturnType<typeof gatherSubmitFailureDetails>> }>}
+ */
+async function waitForCf7SubmitOutcome(page, timeoutMs = 30000) {
+  await page.locator('.wpcf7-response-output').first().waitFor({ state: 'visible', timeout: timeoutMs });
+
+  const deadline = Date.now() + timeoutMs;
+  let lastText = '';
+  let lastDetails = await gatherSubmitFailureDetails(page);
+
+  while (Date.now() < deadline) {
+    lastText = await readCf7ResponseText(page);
+    lastDetails = await gatherSubmitFailureDetails(page);
+
+    if (lastDetails.hasSent || isCf7ThankYouResponse(lastText)) {
+      return { ok: true, responseText: lastText, details: lastDetails };
+    }
+
+    const classes = (lastDetails.responseClasses || '').toLowerCase();
+    if (classes.includes('fusion-success') || classes.includes('wpcf7-mail-sent-ok')) {
+      return { ok: true, responseText: lastText, details: lastDetails };
+    }
+
+    if (/error trying to send your message/i.test(lastText)) {
+      await page.waitForTimeout(2500);
+      lastText = await readCf7ResponseText(page);
+      lastDetails = await gatherSubmitFailureDetails(page);
+      if (lastDetails.hasSent || isCf7ThankYouResponse(lastText)) {
+        return { ok: true, responseText: lastText, details: lastDetails };
+      }
+      return { ok: false, responseText: lastText, details: lastDetails };
+    }
+
+    await page.waitForTimeout(400);
+  }
+
+  return { ok: false, responseText: lastText, details: lastDetails };
 }
 
 /**
@@ -777,8 +904,9 @@ function formatFailureAlertBody(p) {
  * Optional: ALERT_SMTP_PORT (default 587), ALERT_SMTP_SECURE (true for port 465).
  * @param {import('playwright').Page | null} page
  * @param {string} errorMessage
+ * @param {string} contactPageUrl
  */
-async function sendFailureAlertEmail(page, errorMessage) {
+async function sendFailureAlertEmail(page, errorMessage, contactPageUrl) {
   if (!alertEmailOnFailure) return;
 
   let responseText = '';
@@ -796,7 +924,7 @@ async function sendFailureAlertEmail(page, errorMessage) {
   }
 
   const text = formatFailureAlertBody({
-    url: CONTACT_PAGE_URL,
+    url: contactPageUrl,
     error: errorMessage,
     responseText,
     details,
@@ -833,9 +961,9 @@ async function sendFailureAlertEmail(page, errorMessage) {
   const port = Number(process.env.ALERT_SMTP_PORT || 587);
   const secure = /^1|true|yes$/i.test(String(process.env.ALERT_SMTP_SECURE ?? '').trim());
 
-  let hostname = CONTACT_PAGE_URL;
+  let hostname = contactPageUrl;
   try {
-    hostname = new URL(CONTACT_PAGE_URL).hostname;
+    hostname = new URL(contactPageUrl).hostname;
   } catch {
     /* keep full url */
   }
@@ -881,14 +1009,28 @@ function logStartupMode() {
 // Main
 // =============================================================================
 
-(async () => {
-  logStartupMode();
-
-  const outputJsonResult = /^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim());
+/**
+ * Runs one contact-form test for a single URL.
+ * @param {string} contactPageUrl
+ * @param {{ outputJsonResult?: boolean }} [options]
+ * @returns {Promise<any>}
+ */
+async function runContactFormTest(contactPageUrl, options = {}) {
+  const outputJsonResult =
+    typeof options.outputJsonResult === 'boolean'
+      ? options.outputJsonResult
+      : /^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim());
   /** @type {any} */
   let apiResult = null;
   let preSubmitSnapshot = null;
   let responseTextSnapshot = '';
+
+  let ltName = 'Contact Form';
+  try {
+    ltName = `Contact Form - ${new URL(contactPageUrl).hostname}`;
+  } catch {
+    /* keep default */
+  }
 
   const capabilities = {
     browserName: 'Chrome',
@@ -896,13 +1038,13 @@ function logStartupMode() {
     'LT:Options': {
       user: process.env.LT_USERNAME,
       accessKey: process.env.LT_ACCESS_KEY,
-      geoLocation: 'IN',
-      timezone: 'Kolkata',
+      geoLocation: String(process.env.LT_GEO_LOCATION || 'US').trim(),
+      timezone: String(process.env.LT_TIMEZONE || 'New_York').trim(),
       video: true,
       platform: 'Windows 10',
       network: true,
       build: 'ContactFormTest',
-      name: 'AdamParks Contact Form',
+      name: ltName,
       tunnel: false,
       console: true,
     },
@@ -919,8 +1061,8 @@ function logStartupMode() {
   const page = await context.newPage();
 
   try {
-    console.log('Opening Contact Page:', CONTACT_PAGE_URL);
-    await page.goto(CONTACT_PAGE_URL, { waitUntil: 'domcontentloaded' });
+    console.log('Opening Contact Page:', contactPageUrl);
+    await page.goto(contactPageUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
     await dismissOverlays(page);
 
@@ -947,6 +1089,7 @@ function logStartupMode() {
     for (const field of fieldDescriptors) {
       await fillCf7Control(form, field, contactFormValues[field.name]);
     }
+    if (checkAllCheckboxes) await ensureAllFormCheckboxesChecked(form);
 
     await refillSyncCf7(form, fieldDescriptors, contactFormValues, 200);
 
@@ -1008,12 +1151,12 @@ function logStartupMode() {
     await submit.click();
 
     console.log('Waiting for response...');
-    await page.waitForSelector('.wpcf7-response-output', { timeout: 20000 });
-    const responseText = await readCf7ResponseText(page);
+    const outcome = await waitForCf7SubmitOutcome(page, 30000);
+    const responseText = outcome.responseText;
     responseTextSnapshot = responseText;
     console.log('Response:', responseText);
 
-    if (responseText && responseText.toLowerCase().includes('thank')) {
+    if (outcome.ok) {
       console.log('Test PASSED!');
       let emailVerified = false;
       await waitForEmailReceipt();
@@ -1021,7 +1164,7 @@ function logStartupMode() {
 
       apiResult = {
         ok: true,
-        url: CONTACT_PAGE_URL,
+        url: contactPageUrl,
         responseText,
         preSubmit,
         emailVerification: {
@@ -1038,15 +1181,16 @@ function logStartupMode() {
         action: 'setTestStatus',
         arguments: { status: 'passed', remark: verifyEmail ? 'Form + email verification passed' : 'Form submitted successfully' },
       });
+      return apiResult;
     } else {
-      const details = await gatherSubmitFailureDetails(page);
+      const details = outcome.details || (await gatherSubmitFailureDetails(page));
       const diagnostic = formatSubmitFailureSummary(details);
       console.log('CF7 validation details:', JSON.stringify(details, null, 2));
       if (diagnostic) console.log('Summary:', diagnostic);
 
       apiResult = {
         ok: false,
-        url: CONTACT_PAGE_URL,
+        url: contactPageUrl,
         responseText,
         preSubmit: preSubmitSnapshot,
         error: 'Form submission did not return thank-you response',
@@ -1083,7 +1227,7 @@ function logStartupMode() {
       const diagnostic = details ? formatSubmitFailureSummary(details) : '';
       apiResult = {
         ok: false,
-        url: CONTACT_PAGE_URL,
+        url: contactPageUrl,
         responseText: responseTextSnapshot,
         preSubmit: preSubmitSnapshot,
         error: e.message,
@@ -1096,17 +1240,95 @@ function logStartupMode() {
       console.log('RESULT_JSON:' + JSON.stringify(apiResult));
     }
 
-    await sendFailureAlertEmail(page, e.message);
+    await sendFailureAlertEmail(page, e.message, contactPageUrl);
     await lambdaTestStatus(page, { action: 'setTestStatus', arguments: { status: 'failed', remark: e.message } });
     throw e;
   } finally {
-    await pauseIfLocalHeadedKeepingBrowserOpen();
-    await closeBrowserWhenReady(context, browser);
+    if (keepBrowserOpenAfterTest) {
+      await pauseIfLocalHeadedKeepingBrowserOpen();
+    } else {
+      await closeBrowserWhenReady(context, browser);
+    }
   }
-})().catch((err) => {
-  console.error('Unexpected error:', err);
-  if (/^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim())) {
-    console.log('RESULT_JSON:' + JSON.stringify({ ok: false, url: CONTACT_PAGE_URL, error: err.message }));
+}
+
+/**
+ * Runs all configured contact page URLs once (used by CLI and Azure timer function).
+ * @returns {Promise<{ allOk: boolean, results: any[] }>}
+ */
+async function runAllContactTests() {
+  logStartupMode();
+
+  const urls = getContactPageUrls();
+  const outputJsonResult = /^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim());
+
+  if (!urls.length) {
+    const msg = 'No contact page URLs configured. Set CONTACT_PAGE_URLS or CONTACT_PAGE_URL in .env.';
+    console.error(msg);
+    if (outputJsonResult) {
+      console.log('RESULT_JSON:' + JSON.stringify({ ok: false, error: msg }));
+    }
+    throw new Error(msg);
   }
-  process.exit(1);
-});
+
+  const singleUrlMode = urls.length === 1;
+
+  console.log(`Contact page URLs (${urls.length}):`, urls);
+
+  /** @type {any[]} */
+  const results = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (urls.length > 1) {
+      console.log(`\n--- URL ${i + 1}/${urls.length} ---`);
+    }
+    try {
+      const result = await runContactFormTest(url, { outputJsonResult: singleUrlMode && outputJsonResult });
+      results.push(result);
+    } catch (e) {
+      results.push({ ok: false, url, error: e.message });
+    }
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  const allOk = failed.length === 0;
+
+  if (outputJsonResult && !singleUrlMode) {
+    console.log(
+      'RESULT_JSON:' +
+        JSON.stringify({
+          ok: allOk,
+          total: results.length,
+          passed: results.length - failed.length,
+          failed: failed.length,
+          results,
+        })
+    );
+  }
+
+  if (!allOk) {
+    const summary = failed.map((r) => `${r.url}: ${r.error || 'failed'}`).join('; ');
+    throw new Error(`${failed.length}/${results.length} contact form test(s) failed — ${summary}`);
+  }
+
+  return { allOk: true, results };
+}
+
+module.exports = { runAllContactTests, runContactFormTest, getContactPageUrls };
+
+if (require.main === module) {
+  runAllContactTests().catch((err) => {
+    console.error('Unexpected error:', err);
+    const outputJsonResult = /^1|true|yes$/i.test(String(process.env.OUTPUT_JSON_RESULT ?? '').trim());
+    if (outputJsonResult) {
+      const urls = getContactPageUrls();
+      const payload =
+        urls.length === 1
+          ? { ok: false, url: urls[0], error: err.message }
+          : { ok: false, error: err.message, urls };
+      console.log('RESULT_JSON:' + JSON.stringify(payload));
+    }
+    process.exit(1);
+  });
+}

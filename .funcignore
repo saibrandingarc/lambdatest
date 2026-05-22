@@ -1,0 +1,15 @@
+.git*
+.vscode
+.idea
+local.settings.json
+.env
+.env.*
+*.md
+func-start.sh
+test-*.js
+__azurite*
+__blobstorage__
+.azurite-data
+AzuriteConfig
+azure-pipelines.yml
+.github

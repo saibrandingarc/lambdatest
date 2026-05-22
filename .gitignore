@@ -73,6 +73,14 @@ typings/
 .env
 .env.test
 
+# Azure Functions local settings (may contain secrets)
+local.settings.json
+
+# Azurite local storage emulator (regenerated on func start / azurite)
+__azurite_db_*
+.azurite-data/
+AzuriteConfig
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 

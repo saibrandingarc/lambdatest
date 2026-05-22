@@ -1,0 +1,45 @@
+# Azure Function App → Configuration → Application settings
+# Copy each line as Name = Value (do not commit real secrets to git).
+
+FUNCTIONS_WORKER_RUNTIME=node
+WEBSITE_NODE_DEFAULT_VERSION=~20
+
+# LambdaTest (required on Azure — no local browser in Functions)
+USE_LAMBDATEST=1
+LT_USERNAME=
+LT_ACCESS_KEY=
+LT_GEO_LOCATION=US
+LT_TIMEZONE=New_York
+HEADLESS=true
+CLOSE_BROWSER=1
+
+# Check all consent/legal checkboxes (default on; set 0 for keyword heuristics only)
+CHECK_ALL_CHECKBOXES=1
+
+# Contact URLs (required)
+CONTACT_PAGE_URLS=["https://your-site.com/contact-us/"]
+
+# Email verification after successful submit
+VERIFY_EMAIL=1
+EMAIL_VERIFY_TIMEOUT_MS=120000
+EMAIL_VERIFY_POLL_MS=10000
+IMAP_HOST=imap.gmail.com
+IMAP_PORT=993
+IMAP_SECURE=true
+IMAP_USER=
+IMAP_PASS=
+EMAIL_APP_PSWD=
+IMAP_MAILBOX=INBOX
+EMAIL_EXPECTED_SUBJECT=
+EMAIL_EXPECTED_FROM=
+EMAIL_LOOKBACK_MINUTES=10
+
+# Failure alert SMTP
+ALERT_EMAIL_ON_FAILURE=1
+ALERT_SMTP_HOST=smtp.gmail.com
+ALERT_SMTP_PORT=587
+ALERT_SMTP_SECURE=false
+ALERT_EMAIL_TO=
+ALERT_EMAIL_FROM=
+ALERT_SMTP_USER=
+ALERT_SMTP_PASS=
